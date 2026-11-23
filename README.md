@@ -3,9 +3,9 @@
 A **Revit 2026** add-in built for BIM modeling and coordination workflows, focused on streamlining element alignment, connector matching, and connection tasks.
 
 ## Key Features
-- Align elements and connectors efficiently during coordination.
-- Connect matching elements and adjust diameters or stretches where needed.
-- Packaged with a standalone installer for straightforward deployment.
+- Align conduits and connectors efficiently during modeling or coordination.
+- Cycle through connectors and stretch or switch connectors directly from the same palette.
+- Includes a standalone installer for straightforward deployment.
 
 ## Compatibility
 - **Autodesk Revit:** 2026
