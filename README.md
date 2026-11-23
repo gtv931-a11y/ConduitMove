@@ -1,6 +1,6 @@
 # AlignElements
 
-A **Revit 2026** add-in built for BIM modeling and coordination workflows, focused on streamlining element alignment, connector matching, and connection tasks.
+A **Revit 2026** add-in built for BIM modeling and coordination workflows, focused on streamlining conduit alignment, connector matching, and connection tasks.
 
 ## Key Features
 - Align conduits and connectors efficiently during modeling or coordination.
