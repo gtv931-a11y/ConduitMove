@@ -1,0 +1,12 @@
+﻿[Bb]in/
+[Oo]bj/
+0.0 Distribution/
+Dist_ConduitMove/
+Output/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.log
+*.exe
