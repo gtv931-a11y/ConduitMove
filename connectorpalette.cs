@@ -2,9 +2,9 @@
 //  ConnectorPalette.cs
 //
 //  Non-modal floating palette that appears after choosing a connector in any of the
-//  connector commands (Align To Connector, Stretch to Connector (Horizontal),
-//  Stretch Vertical & Connect). Keeps the active connector and selected curve pinned
-//  to switch between commands without repeating selections.
+//  connector commands (Align To Connector, Stretch to Connector,
+//  Stretch and Connect to the Connector). Keeps the active connector and
+//  selected curve pinned to switch between commands without repeating selections.
 //
 //  Version: single-row icon bar, color RGB(59, 68, 83).
 // =====================================================================================
@@ -31,6 +31,7 @@ namespace AlignElementsSuite
         AlignToConnector,
         StretchToConnector,
         VerticalConnect,
+        AlignConduitAxes,
         ChangeConnector
     }
 
@@ -177,6 +178,14 @@ namespace AlignElementsSuite
                     return;
                 }
 
+                if (Action == PaletteAction.AlignConduitAxes)
+                {
+                    string axesMessage = null;
+                    GestorVistas.AlignConduits.AlignAxesConduitsCommand.ExecuteFromPalette(app, ref axesMessage);
+                    ConnectorPalette.RefreshInfo(uidoc);
+                    return;
+                }
+
                 FamilyInstance fam = doc.GetElement(ConnectorPalette.ActiveFamilyId) as FamilyInstance;
                 Connector conn = ConnectorPalette.FindConnector(fam, ConnectorPalette.ActiveConnectorId);
                 if (fam == null || conn == null)
@@ -231,6 +240,7 @@ namespace AlignElementsSuite
         private readonly Button _btnAlign;
         private readonly Button _btnStretch;
         private readonly Button _btnVertical;
+        private readonly Button _btnAxes;
         private readonly Button _btnChange;
         private readonly Button _btnClose;
 
@@ -293,8 +303,9 @@ namespace AlignElementsSuite
             catch { }
 
             _btnAlign    = MakeButton(PngIcon(dir, "AlignToConnector.png"),      "Align To Connector",                PaletteAction.AlignToConnector);
-            _btnStretch  = MakeButton(PngIcon(dir, "StretchToConnector.png"),    "Stretch to Connector (Horizontal)", PaletteAction.StretchToConnector);
-            _btnVertical = MakeButton(PngIcon(dir, "DiameterConnectorPipe.png"), "Stretch Vertical & Connect",        PaletteAction.VerticalConnect);
+            _btnStretch  = MakeButton(PngIcon(dir, "StretchToConnector.png"),    "Stretch to Connector",                    PaletteAction.StretchToConnector);
+            _btnVertical = MakeButton(PngIcon(dir, "DiameterConnectorPipe.png"), "Stretch and Connect to the Connector", PaletteAction.VerticalConnect);
+            _btnAxes     = MakeButton(PngIcon(dir, "PipeAligner.png"),            "Align Conduit Axes",                   PaletteAction.AlignConduitAxes);
             _btnChange   = MakeButton(PngIcon(dir, "change_connectors.png"),     "Change Connector",                  PaletteAction.ChangeConnector);
             _btnClose    = new Button { ToolTip = "Close", Content = VectorIcon("M 6,6 L 24,24 M 24,6 L 6,24") };
             _btnClose.Click += (s, e) => Close();
@@ -315,6 +326,7 @@ namespace AlignElementsSuite
             row.Children.Add(_btnAlign);
             row.Children.Add(_btnStretch);
             row.Children.Add(_btnVertical);
+            row.Children.Add(_btnAxes);
             row.Children.Add(_btnChange);
             row.Children.Add(_btnClose);
 
@@ -402,6 +414,7 @@ namespace AlignElementsSuite
             _btnAlign.IsEnabled = !busy;
             _btnStretch.IsEnabled = !busy;
             _btnVertical.IsEnabled = !busy;
+            _btnAxes.IsEnabled = !busy;
             _btnChange.IsEnabled = !busy;
             _btnClose.IsEnabled = !busy;
         }
