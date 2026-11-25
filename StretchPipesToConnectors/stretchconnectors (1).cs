@@ -98,6 +98,34 @@ namespace StretchConnectors
                 return Result.Cancelled;
             }
 
+            return StretchCurveToConnector(uidoc, fam, conn, curve, ref message);
+        }
+
+        /// <summary>
+        /// Stretches the ALREADY SELECTED pipe/conduit (e.g. the one chosen in Align to Connector and kept
+        /// in the palette) to the connector, WITHOUT prompting for another selection.
+        /// If the saved curve is missing or invalid, falls back to the prompting overload.
+        /// </summary>
+        internal static Result ExecuteWithConnector(UIDocument uidoc, FamilyInstance fam, Connector conn,
+            ElementId curveId, ref string message)
+        {
+            Document doc = uidoc.Document;
+            MEPCurve curve = null;
+            if (curveId != null && !curveId.Equals(ElementId.InvalidElementId))
+                curve = doc.GetElement(curveId) as MEPCurve;
+
+            if (curve == null)
+                return ExecuteWithConnector(uidoc, fam, conn, ref message);
+
+            return StretchCurveToConnector(uidoc, fam, conn, curve, ref message);
+        }
+
+        /// <summary>Shared path: runs the existing stretch logic and keeps the palette pinned to the same curve.</summary>
+        private static Result StretchCurveToConnector(UIDocument uidoc, FamilyInstance fam, Connector conn,
+            MEPCurve curve, ref string message)
+        {
+            Document doc = uidoc.Document;
+
             string error;
             if (!StretchToConnector(doc, curve, conn, out error))
             {
@@ -108,7 +136,7 @@ namespace StretchConnectors
 
             try
             {
-                AlignElementsSuite.ConnectorPalette.ShowFor(uidoc, fam.Id, conn.Id);
+                AlignElementsSuite.ConnectorPalette.ShowFor(uidoc, fam.Id, conn.Id, curve.Id);
             }
             catch { }
 

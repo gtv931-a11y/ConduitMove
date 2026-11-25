@@ -19,4 +19,4 @@ A **Revit 2026** add-in built for BIM modeling and coordination workflows, focus
 ## Repository Structure
 - `AlignElements.csproj` & `AlignElements.addin` — Project configuration and Revit add-in manifest.
 - `alignelementsapp.cs` & `connectorpalette.cs` — Application entry point and UI/palette components.
-- `AlignPipes/`, `AlignPipesWithConnectors/`, `AlignConnectorToConduits/`, `DiameterConnect/`, `StretchPipesToConnectors/` — Core alignment and connection commands.
+- `AlignPipes/`, `AlignAxesConduits/`, `AlignPipesWithConnectors/`, `AlignConnectorToConduits/`, `DiameterConnect/`, `StretchPipesToConnectors/` — Core alignment and connection commands.
