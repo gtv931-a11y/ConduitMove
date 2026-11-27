@@ -46,13 +46,15 @@ namespace GestorVistas.AlignConduits
             UIDocument uidoc = application.ActiveUIDocument;
             Document doc = uidoc.Document;
             View view = doc.ActiveView;
-            ConduitSelectionFilter filter = new ConduitSelectionFilter();
+            // The pivot may be a conduit or a conduit fitting; the second element is always a conduit.
+            PivotSelectionFilter pivotFilter = new PivotSelectionFilter();
+            ConduitSelectionFilter conduitFilter = new ConduitSelectionFilter();
             HalftoneIsolation isolation = null;
 
             Element pivot;
             try
             {
-                pivot = PickConduit(uidoc, "Select the PIVOT conduit (reference axis)", filter);
+                pivot = PickElement(uidoc, "Select the PIVOT conduit or conduit fitting (reference axis)", pivotFilter);
             }
             catch (Autodesk.Revit.Exceptions.OperationCanceledException)
             {
@@ -68,7 +70,7 @@ namespace GestorVistas.AlignConduits
                 Element second;
                 while (true)
                 {
-                    second = PickConduit(uidoc, "Select the SECOND conduit to align", filter);
+                    second = PickElement(uidoc, "Select the SECOND conduit to align", conduitFilter);
                     if (second.Id != pivot.Id) break;
                     ShowMessagePanel("Invalid selection",
                         "Please select a conduit different from the pivot.");
@@ -129,7 +131,30 @@ namespace GestorVistas.AlignConduits
             }
         }
 
-        private static Element PickConduit(UIDocument uidoc, string prompt, ISelectionFilter filter)
+        /// <summary>Allows conduits and conduit fittings (used for the pivot pick).</summary>
+        private class PivotSelectionFilter : ISelectionFilter
+        {
+            public bool AllowElement(Element e)
+            {
+                if (e == null || e.Category == null) return false;
+                long id = e.Category.Id.Value;
+                return id == (long)BuiltInCategory.OST_Conduit ||
+                       id == (long)BuiltInCategory.OST_ConduitFitting;
+            }
+
+            public bool AllowReference(Autodesk.Revit.DB.Reference reference, XYZ position)
+            {
+                return false;
+            }
+        }
+
+        private static bool IsConduitFitting(Element e)
+        {
+            return e != null && e.Category != null &&
+                   e.Category.Id.Value == (long)BuiltInCategory.OST_ConduitFitting;
+        }
+
+        private static Element PickElement(UIDocument uidoc, string prompt, ISelectionFilter filter)
         {
             Autodesk.Revit.DB.Reference r = uidoc.Selection.PickObject(ObjectType.Element, filter, prompt);
             return uidoc.Document.GetElement(r.ElementId);
@@ -262,9 +287,22 @@ namespace GestorVistas.AlignConduits
         private static List<Connector> GetConnectors(Element element)
         {
             List<Connector> list = new List<Connector>();
+            ConnectorManager manager = null;
+
             MEPCurve curve = element as MEPCurve;
-            if (curve == null || curve.ConnectorManager == null) return list;
-            foreach (Connector c in curve.ConnectorManager.Connectors)
+            if (curve != null)
+            {
+                manager = curve.ConnectorManager;
+            }
+            else
+            {
+                FamilyInstance instance = element as FamilyInstance;
+                if (instance != null && instance.MEPModel != null)
+                    manager = instance.MEPModel.ConnectorManager;
+            }
+
+            if (manager == null) return list;
+            foreach (Connector c in manager.Connectors)
                 list.Add(c);
             return list;
         }
@@ -314,6 +352,35 @@ namespace GestorVistas.AlignConduits
             return best;
         }
 
+        /// <summary>
+        /// Returns the facing connector of the pivot (cp) and of the second conduit (c2).
+        /// For a fitting pivot, free (unconnected) connectors are preferred, so the
+        /// conduit is attached to the open connector closest to it.
+        /// </summary>
+        private static void GetFacingPair(Element pivot, Element second,
+                                          out Connector cp, out Connector c2)
+        {
+            List<Connector> pc = GetConnectors(pivot);
+            List<Connector> sc = GetConnectors(second);
+
+            if (IsConduitFitting(pivot))
+            {
+                List<Connector> free = pc.FindAll(c => !c.IsConnected);
+                NearestPair(free.Count > 0 ? free : pc, sc, out cp, out c2);
+            }
+            else
+            {
+                NearestPair(pc, sc, out cp, out c2);
+            }
+        }
+
+        /// <summary>Any unit vector perpendicular to v (used for 180 degree flips).</summary>
+        private static XYZ AnyPerpendicular(XYZ v)
+        {
+            XYZ reference = Math.Abs(v.Z) < 0.9 ? XYZ.BasisZ : XYZ.BasisX;
+            return v.CrossProduct(reference).Normalize();
+        }
+
         /// <summary>Connector diameter in feet, or -1 if it cannot be read.</summary>
         private static double DiameterOf(Connector c)
         {
@@ -328,21 +395,36 @@ namespace GestorVistas.AlignConduits
         {
             List<Connector> pc = GetConnectors(pivot);
             List<Connector> sc = GetConnectors(second);
-            if (pc.Count < 2 || sc.Count < 2)
-                throw new InvalidOperationException("Both conduits must expose two connectors.");
+            bool pivotIsFitting = IsConduitFitting(pivot);
+            if (pc.Count < (pivotIsFitting ? 1 : 2) || sc.Count < 2)
+                throw new InvalidOperationException(pivotIsFitting
+                    ? "The fitting must expose a connector and the conduit must expose two connectors."
+                    : "Both conduits must expose two connectors.");
 
             Connector cp, c2;
-            NearestPair(pc, sc, out cp, out c2);
-            Connector pivotFar = OtherConnector(pc, cp);
+            GetFacingPair(pivot, second, out cp, out c2);
             Connector secondFar = OtherConnector(sc, c2);
 
-            // Pivot axis direction, pointing outward through the facing end.
-            XYZ d = cp.Origin.Subtract(pivotFar.Origin).Normalize();
+            XYZ d;
+            if (pivotIsFitting)
+            {
+                // Guide line: starts at the center of the fitting connector and runs
+                // perpendicular (90 degrees) to the connector face, pointing out of the fitting.
+                d = cp.CoordinateSystem.BasisZ.Normalize();
+            }
+            else
+            {
+                Connector pivotFar = OtherConnector(pc, cp);
+                // Pivot axis direction, pointing outward through the facing end.
+                d = cp.Origin.Subtract(pivotFar.Origin).Normalize();
+            }
             // Second conduit direction, pointing away from its facing end.
             XYZ d2 = secondFar.Origin.Subtract(c2.Origin).Normalize();
 
-            // Choose the target direction that needs the smaller rotation.
-            XYZ target = d2.DotProduct(d) >= 0 ? d : d.Negate();
+            // Conduit pivot: choose the direction that needs the smaller rotation.
+            // Fitting pivot: the conduit must leave the fitting along the connector
+            // normal, so the target is always d.
+            XYZ target = (pivotIsFitting || d2.DotProduct(d) >= 0) ? d : d.Negate();
             double angle = d2.AngleTo(target);
             XYZ anchor = c2.Origin;
             XYZ pivotPoint = cp.Origin;
@@ -352,11 +434,10 @@ namespace GestorVistas.AlignConduits
                 if (angle > AngleTol)
                 {
                     XYZ axis = d2.CrossProduct(target);
-                    if (axis.GetLength() > 1e-12)
-                    {
-                        Line rotAxis = Line.CreateUnbound(anchor, axis.Normalize());
-                        ElementTransformUtils.RotateElement(doc, second.Id, rotAxis, angle);
-                    }
+                    if (axis.GetLength() < 1e-12)
+                        axis = AnyPerpendicular(d2); // exact 180 degree flip
+                    Line rotAxis = Line.CreateUnbound(anchor, axis.Normalize());
+                    ElementTransformUtils.RotateElement(doc, second.Id, rotAxis, angle);
                 }
 
                 // Translate perpendicular to the axis so both axes coincide.
@@ -384,14 +465,13 @@ namespace GestorVistas.AlignConduits
             ElementId pivotId = pivot.Id;
             ElementId secondId = second.Id;
 
-            List<Connector> pc = GetConnectors(pivot);
-            List<Connector> sc = GetConnectors(second);
+            bool pivotIsFitting = IsConduitFitting(pivot);
 
             Connector cp, c2;
-            NearestPair(pc, sc, out cp, out c2);
+            GetFacingPair(pivot, second, out cp, out c2);
 
             if (cp.IsConnected)
-                return "The facing connector of the pivot conduit is already connected to another element.";
+                return "The facing connector of the pivot is already connected to another element.";
             if (c2.IsConnected)
                 return "The facing connector of the second conduit is already connected to another element.";
 
@@ -399,13 +479,14 @@ namespace GestorVistas.AlignConduits
             {
                 List<string> reasons = new List<string>();
 
-                if (TryMerge(doc, pivotId, secondId, reasons))
+                // A fitting cannot be extended, so merging only applies to a conduit pivot.
+                if (!pivotIsFitting && TryMerge(doc, pivotId, secondId, reasons))
                     return null;
 
-                // Merge failed and was rolled back: continue with the fallback.
+                // Merge not applicable / failed and rolled back: continue with the fallback.
                 Element p = doc.GetElement(pivotId);
                 Element s = doc.GetElement(secondId);
-                return StretchAndConnect(doc, p, s, reasons);
+                return StretchAndConnect(doc, p, s, reasons, pivotIsFitting);
             });
         }
 
@@ -491,13 +572,10 @@ namespace GestorVistas.AlignConduits
 
         /// <summary>Stretch to touch, then direct connection / union / reducer.</summary>
         private static string StretchAndConnect(Document doc, Element pivot, Element second,
-                                                List<string> reasons)
+                                                List<string> reasons, bool pivotIsFitting)
         {
-            List<Connector> pc = GetConnectors(pivot);
-            List<Connector> sc = GetConnectors(second);
-
             Connector cp, c2;
-            NearestPair(pc, sc, out cp, out c2);
+            GetFacingPair(pivot, second, out cp, out c2);
 
             LocationCurve loc = second.Location as LocationCurve;
             if (loc == null)
@@ -531,7 +609,14 @@ namespace GestorVistas.AlignConduits
             bool sameSize = dPivot > 0 && dSecond > 0 &&
                             Math.Abs(dPivot - dSecond) <= LengthTol;
 
-            if (sameSize)
+            if (pivotIsFitting)
+            {
+                // The conduit connector must meet the fitting connector directly
+                // (a union / reducer cannot be placed between a conduit and a fitting here).
+                if (TryDirect(doc, pivot, second, pivotEnd, reasons))
+                    return null;
+            }
+            else if (sameSize)
             {
                 if (TryDirect(doc, pivot, second, pivotEnd, reasons))
                     return null;
@@ -546,7 +631,7 @@ namespace GestorVistas.AlignConduits
                     return null;
             }
 
-            return BuildFailureMessage(dPivot, dSecond, sameSize, reasons);
+            return BuildFailureMessage(dPivot, dSecond, sameSize, reasons, pivotIsFitting);
         }
 
         /// <summary>Direct connector-to-connector connection at the touching point.</summary>
@@ -620,7 +705,8 @@ namespace GestorVistas.AlignConduits
         }
 
         private static string BuildFailureMessage(double dPivot, double dSecond,
-                                                  bool sameSize, List<string> reasons)
+                                                  bool sameSize, List<string> reasons,
+                                                  bool pivotIsFitting)
         {
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("The conduits were aligned and stretched until they touch, " +
@@ -640,7 +726,13 @@ namespace GestorVistas.AlignConduits
             sb.AppendLine();
 
             sb.AppendLine("Possible causes:");
-            if (!sameSize)
+            if (pivotIsFitting)
+            {
+                sb.AppendLine(" - The conduit size does not match the fitting connector size.");
+                sb.AppendLine(" - The fitting connector belongs to a different conduit type or kind.");
+                sb.AppendLine(" - The conduit is not perpendicular to the fitting connector face.");
+            }
+            else if (!sameSize)
                 sb.AppendLine(" - The conduit type's Routing Preferences have no transition (reducer) " +
                               "fitting for these sizes.");
             else

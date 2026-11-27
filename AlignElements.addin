@@ -2,7 +2,7 @@
 <RevitAddIns>
   <AddIn Type="Application">
     <Name>AlignElements</Name>
-    <Assembly>AlignElements.dll</Assembly>
+    <Assembly>AlignElements\AlignElements.dll</Assembly>
     <AddInId>9A4E21C8-6F3B-4D19-8B2E-5C0D7A1E94F2</AddInId>
     <FullClassName>AlignElementsSuite.AlignElementsApp</FullClassName>
     <VendorId>IRVC</VendorId>

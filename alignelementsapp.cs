@@ -19,7 +19,7 @@ namespace AlignElementsSuite
 
                 var pdData = new PulldownButtonData(
                     "AlignElementsMenu",
-                    "Conduits Smart" + Environment.NewLine + "Align Conduit");
+                    "Conduits Smart");
                 pdData.ToolTip = "3D MEP alignment tools.";
                 SetIcon(pdData, Path.Combine(dir, "AlignElements.png"));
 
@@ -36,7 +36,7 @@ namespace AlignElementsSuite
 
                 var btnAxes = new PushButtonData(
                     "AlignAxesConduitsBtn",
-                    "Align Conduit" + Environment.NewLine + "Axes",
+                    "Align Conduits" + Environment.NewLine + "(Axes)",
                     asmPath,
                     "GestorVistas.AlignConduits.AlignAxesConduitsCommand");
                 btnAxes.ToolTip = "Aligns the axes of two conduits and optionally connects them.";
@@ -45,34 +45,18 @@ namespace AlignElementsSuite
 
                 var btnConn = new PushButtonData(
                     "AlignToConnectorBtn",
-                    "Align To" + Environment.NewLine + "Connector",
+                    "Conduit to" + Environment.NewLine + "Connector",
                     asmPath,
                     "AlignToConnector.AlinearConectorCommand");
                 btnConn.ToolTip = "Aligns a pipe or conduit to a family connector.";
                 SetIcon(btnConn, Path.Combine(dir, "AlignToConnector.png"));
                 pd.AddPushButton(btnConn);
 
-                var btnStretch = new PushButtonData(
-                    "StretchToConnectorBtn",
-                    "Stretch to" + Environment.NewLine + "Connector",
-                    asmPath,
-                    "StretchConnectors.EstirarConectorCommand");
-                btnStretch.ToolTip = "Stretches the nearest end of a pipe or conduit horizontally to a family connector.";
-                SetIcon(btnStretch, Path.Combine(dir, "StretchToConnector.png"));
-                pd.AddPushButton(btnStretch);
-
-                var btnDiam = new PushButtonData(
-                    "DiameterConnectorPipeBtn",
-                    "Stretch and Connect" + Environment.NewLine + "to the Connector",
-                    asmPath,
-                    "PipeAlignerVertical.ConectarVerticalCommand");
-                btnDiam.ToolTip = "Stretches a segment vertically to a family connector, matches diameter, and connects it.";
-                SetIcon(btnDiam, Path.Combine(dir, "DiameterConnectorPipe.png"));
-                pd.AddPushButton(btnDiam);
+                // Stretch no aparece en el ribbon: se usa solo desde la paleta (Enter / Space).
 
                 var btnC2P = new PushButtonData(
                     "AlignConnectorToPipeBtn",
-                    "Align Connector" + Environment.NewLine + "Element to Conduit",
+                    "Connector to" + Environment.NewLine + "Conduit",
                     asmPath,
                     "ConnectorToPipe.AlinearConectorATuberiaCommand");
                 btnC2P.ToolTip = "Moves a family to align one of its connectors with a conduit or pipe.";

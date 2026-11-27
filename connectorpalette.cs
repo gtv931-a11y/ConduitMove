@@ -96,6 +96,7 @@ namespace AlignElementsSuite
                 ? fam.Symbol.Family.Name
                 : fam.Name;
             _window.SetConnectorInfo(famLabel, connId);
+            _window.ResetStretchState();   // new connector / new alignment: the next Enter stretches again
             _window.FocusPalette();
         }
 
@@ -174,6 +175,11 @@ namespace AlignElementsSuite
                     if (StretchConnectors.EstirarConectorCommand.PickFamilyAndConnector(uidoc, doc, out newFam, out newConn))
                     {
                         ConnectorPalette.ShowFor(uidoc, newFam.Id, newConn.Id);
+
+                        // Start Align To Connector right away so the user is asked for the pipe.
+                        string alignMsg = null;
+                        AlignToConnector.AlinearConectorCommand.ExecuteWithConnector(uidoc, newFam, newConn, ref alignMsg);
+                        ConnectorPalette.RefreshInfo(uidoc);
                     }
                     return;
                 }
@@ -202,8 +208,19 @@ namespace AlignElementsSuite
                         AlignToConnector.AlinearConectorCommand.ExecuteWithConnector(uidoc, fam, conn, ref msg);
                         break;
                     case PaletteAction.StretchToConnector:
-                        StretchConnectors.EstirarConectorCommand.ExecuteWithConnector(uidoc, fam, conn, ref msg);
-                        break;
+                        {
+                            // Use the pipe already stored in the palette instead of asking again.
+                            ElementId savedCurveId = ConnectorPalette.ActiveCurveId;
+                            bool hasSavedCurve = savedCurveId != null
+                                && !savedCurveId.Equals(ElementId.InvalidElementId)
+                                && doc.GetElement(savedCurveId) != null;
+
+                            if (hasSavedCurve)
+                                StretchConnectors.EstirarConectorCommand.ExecuteWithConnector(uidoc, fam, conn, savedCurveId, ref msg);
+                            else
+                                StretchConnectors.EstirarConectorCommand.ExecuteWithConnector(uidoc, fam, conn, ref msg);
+                            break;
+                        }
                     case PaletteAction.VerticalConnect:
                         PipeAlignerVertical.ConectarVerticalCommand.ExecuteWithConnector(uidoc, fam, conn, ref msg);
                         break;
@@ -219,6 +236,10 @@ namespace AlignElementsSuite
             {
                 if (ConnectorPalette.Window != null)
                 {
+                    // After Stretch, the next Enter / Space closes the palette (ends the command).
+                    if (Action == PaletteAction.StretchToConnector)
+                        ConnectorPalette.Window.MarkStretchDone();
+
                     ConnectorPalette.Window.SetBusy(false);
                     ConnectorPalette.Window.FocusPalette();
                 }
@@ -237,12 +258,11 @@ namespace AlignElementsSuite
             System.Windows.Media.Color.FromRgb(59, 68, 83);
 
         private readonly TextBlock _info = new TextBlock();
-        private readonly Button _btnAlign;
-        private readonly Button _btnStretch;
-        private readonly Button _btnVertical;
-        private readonly Button _btnAxes;
+        private readonly Button _btnStretch;   // informational only, always disabled
         private readonly Button _btnChange;
         private readonly Button _btnClose;
+        private bool _busy;
+        private bool _stretchDone;   // true after Stretch ran: the next Enter / Space closes the palette
 
         public Action<PaletteAction> RequestAction;
 
@@ -302,12 +322,36 @@ namespace AlignElementsSuite
             }
             catch { }
 
-            _btnAlign    = MakeButton(PngIcon(dir, "AlignToConnector.png"),      "Align To Connector",                PaletteAction.AlignToConnector);
-            _btnStretch  = MakeButton(PngIcon(dir, "StretchToConnector.png"),    "Stretch to Connector",                    PaletteAction.StretchToConnector);
-            _btnVertical = MakeButton(PngIcon(dir, "DiameterConnectorPipe.png"), "Stretch and Connect to the Connector", PaletteAction.VerticalConnect);
-            _btnAxes     = MakeButton(PngIcon(dir, "PipeAligner.png"),            "Align Conduit Axes",                   PaletteAction.AlignConduitAxes);
-            _btnChange   = MakeButton(PngIcon(dir, "change_connectors.png"),     "Change Connector",                  PaletteAction.ChangeConnector);
-            _btnClose    = new Button { ToolTip = "Close", Content = VectorIcon("M 6,6 L 24,24 M 24,6 L 6,24") };
+            // Informational icon: no click handler, permanently disabled.
+            _btnStretch = new Button
+            {
+                Content = PngIcon(dir, "StretchToConnector.png"),
+                ToolTip = "Enter / Space = Stretch (press again to close)",
+                IsEnabled = false
+            };
+            ToolTipService.SetShowOnDisabled(_btnStretch, true);
+
+            // Small white caption under the (disabled) Stretch icon
+            var stretchCaption = new TextBlock
+            {
+                Text = "Enter / Space" + Environment.NewLine + "= Stretch",
+                FontSize = 9,
+                Foreground = Brushes.White,
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, -2, 0, 2)
+            };
+            var stretchPanel = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                VerticalAlignment = VerticalAlignment.Top,
+                Width = 58
+            };
+            stretchPanel.Children.Add(_btnStretch);
+            stretchPanel.Children.Add(stretchCaption);
+
+            _btnChange = MakeButton(PngIcon(dir, "change_connectors.png"), "Change Connector", PaletteAction.ChangeConnector);
+            _btnClose = new Button { ToolTip = "Close", Content = VectorIcon("M 6,6 L 24,24 M 24,6 L 6,24") };
             _btnClose.Click += (s, e) => Close();
 
             var header = new Border
@@ -323,10 +367,9 @@ namespace AlignElementsSuite
             header.MouseLeftButtonDown += (s, e) => { try { DragMove(); } catch { } };
 
             var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(4) };
-            row.Children.Add(_btnAlign);
-            row.Children.Add(_btnStretch);
-            row.Children.Add(_btnVertical);
-            row.Children.Add(_btnAxes);
+            _btnChange.VerticalAlignment = VerticalAlignment.Top;
+            _btnClose.VerticalAlignment = VerticalAlignment.Top;
+            row.Children.Add(stretchPanel);
             row.Children.Add(_btnChange);
             row.Children.Add(_btnClose);
 
@@ -346,7 +389,12 @@ namespace AlignElementsSuite
                 if (e.Key == Key.Enter || e.Key == Key.Return || e.Key == Key.Space)
                 {
                     e.Handled = true;
-                    Close();
+                    if (_busy) return;
+
+                    // 1st Enter / Space: stretch the saved conduit to the saved connector.
+                    // 2nd Enter / Space: close the palette (end the command).
+                    if (_stretchDone) Close();
+                    else Fire(PaletteAction.StretchToConnector);
                 }
             };
         }
@@ -399,10 +447,43 @@ namespace AlignElementsSuite
             _info.Text = familyName + " · Connector #" + connId;
         }
 
+        public void ResetStretchState() { _stretchDone = false; }
+
+        public void MarkStretchDone() { _stretchDone = true; }
+
         public void FocusPalette()
+        {
+            ActivateNow();
+
+            // Revit takes the keyboard focus back when a command (or external event) returns, and then
+            // Enter would just repeat the last Revit command. Re-activate once it is idle.
+            try
+            {
+                Dispatcher.BeginInvoke(new Action(ActivateNow),
+                    System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+
+                foreach (int ms in new[] { 150, 500 })
+                {
+                    var timer = new System.Windows.Threading.DispatcherTimer
+                    {
+                        Interval = TimeSpan.FromMilliseconds(ms)
+                    };
+                    timer.Tick += (s, e) =>
+                    {
+                        timer.Stop();
+                        ActivateNow();
+                    };
+                    timer.Start();
+                }
+            }
+            catch { }
+        }
+
+        private void ActivateNow()
         {
             try
             {
+                if (!IsVisible) return;
                 Activate();
                 Focus();
             }
@@ -411,10 +492,8 @@ namespace AlignElementsSuite
 
         public void SetBusy(bool busy)
         {
-            _btnAlign.IsEnabled = !busy;
-            _btnStretch.IsEnabled = !busy;
-            _btnVertical.IsEnabled = !busy;
-            _btnAxes.IsEnabled = !busy;
+            _busy = busy;
+            // _btnStretch is informational and stays disabled, so it is not touched here.
             _btnChange.IsEnabled = !busy;
             _btnClose.IsEnabled = !busy;
         }

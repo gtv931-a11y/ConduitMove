@@ -41,6 +41,13 @@ namespace AlignToConnector
         public const double SkewTolFt = 0.5 * MmToFt;        // Lateral deviation tolerated on a neighbour (0.5 mm; above this the neighbour moves as a whole)
         public const double SweepEndShrinkMm = 5.0;          // Shortens the sweep solid at both ends
 
+        /// <summary>
+        /// A segment whose axis has |Direction.Z| at or below this value is treated as horizontal (lying in the XY plane):
+        /// besides the XY alignment it is also moved in Z so its centre axis passes through the connector.
+        /// Vertical / steep segments are NOT affected.
+        /// </summary>
+        public const double HorizontalMaxSlope = 0.2;
+
         public const double GuideMinHalfLengthM = 20.0;      // Cross guide is at least ±20 m
         public const double GuideExtraMarginM = 5.0;         // Margin over maximum distance to targets
 
@@ -93,7 +100,7 @@ namespace AlignToConnector
         InvalidGeometry    // Geometry cannot be evaluated
     }
 
-    internal enum AlignRequest { Retry, DisconnectAndAlign, MoveWithFamily, MoveChain, Cleanup }
+    internal enum AlignRequest { Retry, DisconnectAndAlign, MoveWithFamily, Cleanup }
 
     internal sealed class ConflictInfo
     {
@@ -102,6 +109,8 @@ namespace AlignToConnector
         public ElementId CurveId;
         public ElementId ConflictElementId = ElementId.InvalidElementId;
         public HashSet<ElementId> ChainIds = new HashSet<ElementId>();
+        public HashSet<ElementId> FrontierIds = new HashSet<ElementId>();      // Boundary families touched by the chain
+        public List<ElementId> InvolvedIds = new List<ElementId>();            // Elements reported by Revit when it rejects the change
         public string Message;
         public int RiskCount;        // Domino effect: branches that would compromise another fixed element
         public string RiskText = "";
@@ -159,6 +168,7 @@ namespace AlignToConnector
                 CurveId = Curve.Id,
                 ConflictElementId = element ?? ElementId.InvalidElementId,
                 ChainIds = ChainIds,
+                FrontierIds = FrontierIds,
                 Message = msg
             };
             return Conflict;
@@ -173,6 +183,9 @@ namespace AlignToConnector
         public XYZ PivotPointOverride;
         public AlignAxis Axis;
         public List<ElementId> TargetIds = new List<ElementId>();
+        /// <summary>Pipe/conduit chosen by the user. Kept with PivotId / PivotConnectorId so the
+        /// palette (and later Stretch) reuse exactly this pipe and connector without asking again.</summary>
+        public ElementId TargetCurveId = ElementId.InvalidElementId;
         public int NextIndex;
         public bool ForceRigid;      // Retry: all conduits in the chain move as a whole (without stretching)
         public string Note;          // Notice when a segment is skipped without moving (so it is not silent)
@@ -180,12 +193,19 @@ namespace AlignToConnector
         /// <summary>User decision per boundary family.</summary>
         public Dictionary<ElementId, FrontierPolicy> Policies = new Dictionary<ElementId, FrontierPolicy>();
 
-        /// <summary>"Move Chain Elements": the whole chain moves rigidly; boundary families are detached, collisions ignored.
-        /// Applies only to the segment currently in conflict (reset as soon as it is processed).</summary>
-        public bool MoveChainMode;
-
         /// <summary>"Disconnect and Align" on a non-boundary conflict: every connected family is detached from the chain.</summary>
         public bool DisconnectAll;
+
+        /// <summary>"Move with Element" on a non-boundary conflict: EVERYTHING attached to the segment (fittings, runs and
+        /// boundary families) moves as one rigid body in a single move.</summary>
+        public bool MoveAllAttached;
+
+        /// <summary>"Disconnect and Align" on a non-boundary conflict: elements where the chain is cut
+        /// (the point that limits the movement). They are not moved and their links are detached.</summary>
+        public HashSet<ElementId> CutIds = new HashSet<ElementId>();
+
+        /// <summary>Fallback when no limiting element could be located: the moving body is detached from everything else.</summary>
+        public bool CutAll;
 
         public ConflictInfo Conflict;
 
@@ -457,10 +477,15 @@ namespace AlignToConnector
                             {
                                 Session.Policies[Session.Conflict.ConflictElementId] = FrontierPolicy.Disconnect;
                             }
+                            else if (AlignEngine.IsConnectivityConflict(Session.Conflict.Kind))
+                            {
+                                // Cut at the point that limits the movement; the user fixes the rest in Revit.
+                                AlignEngine.PrepareCut(Session);
+                            }
                             else
                             {
                                 // Detach the conflicting element; if it is not a separate element
-                                // (e.g. Revit rejected the move), detach every connected family instead.
+                                // (e.g. an obstacle), detach every connected family instead.
                                 if (AlignEngine.DisconnectConflictElement(Session) == 0)
                                     Session.DisconnectAll = true;
                             }
@@ -469,11 +494,22 @@ namespace AlignToConnector
                         break;
 
                     case AlignRequest.MoveWithFamily:
+                        if (Session.Conflict != null && Session.Conflict.Kind != ConflictKind.Frontier
+                            && AlignEngine.IsConnectivityConflict(Session.Conflict.Kind))
+                        {
+                            // Everything attached moves as one rigid body in a single move; nothing is stretched.
+                            Session.CutIds.Clear();
+                            Session.CutAll = false;
+                            Session.DisconnectAll = false;
+                            Session.MoveAllAttached = true;
+                            closing = RunEvaluation(uidoc);
+                            break;
+                        }
                         if (Session.Conflict != null && Session.Conflict.Kind != ConflictKind.Frontier)
                         {
                             Window.ShowConflict(Session);
                             Window.AppendNote(
-                                "'Move with Element' only applies when the chain touches a connected boundary family.");
+                                "'Move with Element' does not apply to this type of conflict.");
                             break;
                         }
                         if (Session.Conflict != null && Session.Conflict.Kind == ConflictKind.Frontier)
@@ -494,13 +530,6 @@ namespace AlignToConnector
                         }
                         closing = RunEvaluation(uidoc);
                         break;
-
-                    case AlignRequest.MoveChain:
-                        // Moves the whole chain (segment, fittings and adjacent runs) rigidly.
-                        // Boundary families are detached automatically, so the flow never blocks.
-                        Session.MoveChainMode = true;
-                        closing = RunEvaluation(uidoc);
-                        break;
                 }
 
                 if (closing && req != AlignRequest.Cleanup)
@@ -508,7 +537,6 @@ namespace AlignToConnector
             }
             catch (Exception ex)
             {
-                Session.MoveChainMode = false;
                 if (req == AlignRequest.Cleanup) closing = true;
                 else Window.SetStatus("Error", ex.Message);
             }
@@ -530,17 +558,26 @@ namespace AlignToConnector
             return false;
         }
 
-        /// <summary>Everything resolved: refreshes the floating connector palette and reports skipped segments.</summary>
+        /// <summary>Everything resolved: shows/refreshes the floating connector palette (conflict path)
+        /// and reports skipped segments. This is the AlignWindow flow, not the palette itself.</summary>
         private void AfterResolved(UIDocument uidoc)
         {
-            if (uidoc != null && Session.TargetIds.Count > 0)
+            if (uidoc != null)
             {
-                try
+                // Prefer the pipe explicitly chosen by the user; fall back to the first target.
+                ElementId curveId = Session.TargetCurveId;
+                if ((curveId == null || curveId.Equals(ElementId.InvalidElementId)) && Session.TargetIds.Count > 0)
+                    curveId = Session.TargetIds[0];
+
+                if (curveId != null && !curveId.Equals(ElementId.InvalidElementId))
                 {
-                    AlignElementsSuite.ConnectorPalette.ShowFor(uidoc, Session.PivotId,
-                        Session.PivotConnectorId, Session.TargetIds[0]);
+                    try
+                    {
+                        AlignElementsSuite.ConnectorPalette.ShowFor(uidoc, Session.PivotId,
+                            Session.PivotConnectorId, curveId);
+                    }
+                    catch { }
                 }
-                catch { }
             }
 
             if (!string.IsNullOrEmpty(Session.Note))
@@ -564,7 +601,6 @@ namespace AlignToConnector
         private readonly Button _retry = new Button();
         private readonly Button _disc = new Button();
         private readonly Button _move = new Button();
-        private readonly Button _chain = new Button();
         private readonly Button _close = new Button();
         private bool _forceClose;
         private bool _cleanupRequested;
@@ -680,15 +716,13 @@ namespace AlignToConnector
             _retry.Content = "Recalculate / Re-evaluate";
             _disc.Content = "Disconnect and Align";
             _move.Content = "Move with Element";
-            _chain.Content = "Move Chain Elements";
             _close.Content = "Cancel / Close";
-            foreach (Button b in new[] { _retry, _disc, _move, _chain, _close })
+            foreach (Button b in new[] { _retry, _disc, _move, _close })
                 b.Margin = new Thickness(0, 0, 0, 6);
 
             _retry.Click += (s, e) => Fire(AlignRequest.Retry);
             _disc.Click += (s, e) => Fire(AlignRequest.DisconnectAndAlign);
             _move.Click += (s, e) => Fire(AlignRequest.MoveWithFamily);
-            _chain.Click += (s, e) => Fire(AlignRequest.MoveChain);
             _close.Click += (s, e) => Close();
 
             var body = new StackPanel { Margin = new Thickness(12) };
@@ -697,7 +731,6 @@ namespace AlignToConnector
             body.Children.Add(_retry);
             body.Children.Add(_disc);
             body.Children.Add(_move);
-            body.Children.Add(_chain);
             body.Children.Add(_close);
 
             var root = new StackPanel();
@@ -786,8 +819,8 @@ namespace AlignToConnector
             }
             else
             {
-                detail += "\n\nResolve the conflict in Revit and press Recalculate, use 'Disconnect and Align' " +
-                          "to detach the conflicting element, or 'Move Chain Elements' to move the whole chain.";
+                detail += "\n\nResolve the conflict in Revit and press Recalculate. 'Disconnect and Align' detaches the " +
+                          "point that limits the movement; 'Move with Element' moves everything attached together.";
             }
 
             SetStatus(title, detail);
@@ -847,8 +880,7 @@ namespace AlignToConnector
         /// </summary>
         public static bool ProcessPending(AlignSession s, UIDocument uidoc)
         {
-            try { return ProcessPendingCore(s, uidoc); }
-            finally { s.MoveChainMode = false; }
+            return ProcessPendingCore(s, uidoc);
         }
 
         private static bool ProcessPendingCore(AlignSession s, UIDocument uidoc)
@@ -866,14 +898,8 @@ namespace AlignToConnector
                 if (r.AlreadyAligned)
                 {
                     // Nothing moved: explain why instead of exiting silently
-                    XYZ cpt = PivotCenter(doc, s);
-                    XYZ mpt = MidPoint(p);
-                    double dz = (cpt != null && mpt != null) ? Math.Abs(cpt.Z - mpt.Z) : 0;
-                    s.Note = "Segment [Id " + p.Id + "] was not moved: in plan (X, Y) it is already aligned with the connector " +
-                             "(difference " + (r.Displacement.GetLength() / Cfg.MmToFt).ToString("0.##") + " mm).\n" +
-                             "This command only aligns in plan and does not change the Z elevation" +
-                             (dz > Cfg.AlignTolFt ? " (Z difference: " + (dz / Cfg.MmToFt).ToString("0") + " mm)." : ".");
-                    s.MoveChainMode = false;
+                    s.Note = "Segment [Id " + p.Id + "] was not moved: it is already aligned with the connector " +
+                             "(difference " + (r.Displacement.GetLength() / Cfg.MmToFt).ToString("0.##") + " mm).";
                     s.NextIndex++;
                     continue;
                 }
@@ -907,8 +933,6 @@ namespace AlignToConnector
                     return false;
                 }
 
-                // Segment done: "Move Chain Elements" only applied to it, the next pending segment is evaluated normally
-                s.MoveChainMode = false;
                 s.NextIndex++;
             }
             return true;
@@ -967,6 +991,29 @@ namespace AlignToConnector
             return true;
         }
 
+        /// <summary>
+        /// Vertical movement needed so the centre axis of a horizontal segment, once moved by planDisp (XY),
+        /// passes through the connector origin c. Returns 0 for vertical / steep segments (unchanged behaviour).
+        /// </summary>
+        private static double ZDelta(Line axis, XYZ c, XYZ mid, XYZ planDisp)
+        {
+            XYZ dir = axis.Direction;
+            if (Math.Abs(dir.Z) > Cfg.HorizontalMaxSlope) return 0;
+
+            double hh = dir.X * dir.X + dir.Y * dir.Y;
+            if (hh < 1e-9) return 0;
+
+            // Point of the (moved) axis that lies over the connector in plan, and its height
+            double t = ((c.X - mid.X - planDisp.X) * dir.X + (c.Y - mid.Y - planDisp.Y) * dir.Y) / hh;
+            double zOnAxis = mid.Z + planDisp.Z + dir.Z * t;
+            return c.Z - zOnAxis;
+        }
+
+        private static XYZ WithZ(Line axis, XYZ c, XYZ mid, XYZ planDisp)
+        {
+            return new XYZ(planDisp.X, planDisp.Y, ZDelta(axis, c, mid, planDisp));
+        }
+
         private static List<XYZ> ComputeCandidates(Document doc, AlignSession s, Line axis, out string error)
         {
             var list = new List<XYZ>();
@@ -985,7 +1032,7 @@ namespace AlignToConnector
                     return list;
                 }
                 double deltaFixed = s.Axis == AlignAxis.EqualizeY ? c.Y - mid.Y : c.X - mid.X;
-                list.Add(dir.Multiply(deltaFixed));
+                list.Add(WithZ(axis, c, mid, dir.Multiply(deltaFixed)));
                 return list;
             }
 
@@ -1000,9 +1047,10 @@ namespace AlignToConnector
             uh = uh.Normalize();
             XYZ n = new XYZ(-uh.Y, uh.X, 0);
             double delta = v.DotProduct(n);
-            AddUnique(list, n.Multiply(delta));
-            if (Math.Abs(n.X) > 0.2) AddUnique(list, new XYZ(delta / n.X, 0, 0));
-            if (Math.Abs(n.Y) > 0.2) AddUnique(list, new XYZ(0, delta / n.Y, 0));
+            // Horizontal segments also get the Z movement; vertical segments (handled above) stay as they were
+            AddUnique(list, WithZ(axis, c, mid, n.Multiply(delta)));
+            if (Math.Abs(n.X) > 0.2) AddUnique(list, WithZ(axis, c, mid, new XYZ(delta / n.X, 0, 0)));
+            if (Math.Abs(n.Y) > 0.2) AddUnique(list, WithZ(axis, c, mid, new XYZ(0, delta / n.Y, 0)));
             return list;
         }
 
@@ -1065,6 +1113,10 @@ namespace AlignToConnector
                             continue;
                         }
 
+                        // Cut point chosen with 'Disconnect and Align': not traversed, not moved;
+                        // its link with the moving body is detached on apply (DetachCutLinks).
+                        if (s.CutIds.Contains(o.Id)) continue;
+
                         if (IsFitting(o))
                         {
                             movers.Add(o.Id);
@@ -1073,11 +1125,14 @@ namespace AlignToConnector
                         }
                         else if (o is MEPCurve && SameKind(p, o))
                         {
+                            // Fallback cut: no run is stretched or dragged, the body is simply detached from it.
+                            if (s.CutAll) continue;
+
                             // If the neighbour cannot absorb the movement (skewed / no slack),
                             // it is NOT a conflict: the curve simply moves rigidly with the chain.
                             XYZ nbNear;
                             double nbAmt;
-                            if (s.ForceRigid || s.MoveChainMode ||
+                            if (s.ForceRigid || s.MoveAllAttached ||
                                 CheckNeighbour((MEPCurve)o, other.Origin, d, out nbNear, out nbAmt) != NbResult.Ok)
                             {
                                 movers.Add(o.Id);
@@ -1130,12 +1185,12 @@ namespace AlignToConnector
             {
                 AnalyzeDomino(doc, p, d, fi, r.ChainIds);
 
-                // The user already decided, or the chain is being moved rigidly (families are detached on apply)
-                if (s.MoveChainMode || s.DisconnectAll || s.Policies.ContainsKey(fi.Family.Id)) continue;
+                // The user already decided
+                if (s.DisconnectAll || s.MoveAllAttached || s.Policies.ContainsKey(fi.Family.Id)) continue;
 
                 ConflictInfo cf = r.Fail(ConflictKind.Frontier, fi.FamilySide.Origin, fi.Family.Id,
                     "The chain touches a boundary family. Choose 'Disconnect and Align' (aligns only the segment), " +
-                    "'Move with Element' (the family moves together with the chain) or 'Move Chain Elements' (moves the whole chain and detaches it from the family).");
+                    "'Move with Element' (the family moves together with the chain).");
                 cf.RiskCount = fi.Risks.Count;
                 cf.RiskText = string.Join("\n", fi.Risks.Select(k =>
                     "• " + Describe(doc, k.Blocker == null ? ElementId.InvalidElementId : k.Blocker.Id) +
@@ -1171,12 +1226,8 @@ namespace AlignToConnector
             }
 
             // ===== Pass 3: Physical collision =====
-            // "Move Chain Elements" is an explicit user override: the collision test is skipped
-            if (!s.MoveChainMode)
-            {
-                ConflictInfo col = CheckCollisions(doc, s, p, axis, d, r);
-                if (col != null) r.Conflict = col;
-            }
+            ConflictInfo col = CheckCollisions(doc, s, p, axis, d, r);
+            if (col != null) r.Conflict = col;
 
             return r;
         }
@@ -1426,14 +1477,17 @@ namespace AlignToConnector
                     }
 
                     // 1) User decisions on boundary families
-                    bool movedFamily = false;
+                    // Families that move are NOT moved here one by one: Revit would try to keep the connections
+                    // and reject the change. They travel inside the same rigid move as the chain (MoveChain).
+                    var familyMoveIds = new List<ElementId>();
                     foreach (FrontierInfo fi in r.Frontiers)
                     {
                         FrontierPolicy pol;
                         if (!s.Policies.TryGetValue(fi.Family.Id, out pol))
                         {
-                            if (!s.MoveChainMode && !s.DisconnectAll) continue;
-                            pol = FrontierPolicy.Disconnect;
+                            if (s.MoveAllAttached) pol = FrontierPolicy.MoveWith;
+                            else if (s.DisconnectAll) pol = FrontierPolicy.Disconnect;
+                            else continue;
                         }
 
                         if (pol == FrontierPolicy.Disconnect)
@@ -1448,26 +1502,19 @@ namespace AlignToConnector
                         {
                             // Disconnect branches that would compromise another fixed element
                             foreach (DominoRisk risk in fi.Risks)
-                                risk.OnFamily.DisconnectFrom(risk.FirstOther);
+                            {
+                                try { risk.OnFamily.DisconnectFrom(risk.FirstOther); }
+                                catch { }
+                            }
 
-                            ElementTransformUtils.MoveElement(doc, fi.Family.Id, r.Displacement);
-                            movedFamily = true;
+                            familyMoveIds.Add(fi.Family.Id);
                         }
                     }
 
-                    // 2) Align segment (recalculate remaining delta if the family moved)
+                    // 2) Align: segment + fittings + families that move, all together with the SAME vector
                     XYZ d = r.Displacement;
-                    if (movedFamily)
-                    {
-                        doc.Regenerate();
-                        Line now = GetLine(p);
-                        string err = null;
-                        d = now != null ? ComputeDisplacement(doc, s, now, out err) : XYZ.Zero;
-                        if (err != null) d = XYZ.Zero;
-                    }
-
                     if (d.GetLength() >= Cfg.AlignTolFt)
-                        MoveChain(doc, r, d);
+                        MoveChain(doc, s, r, d, familyMoveIds);
 
                     TransactionStatus st = t.Commit();
                     if (st == TransactionStatus.Committed) return null;
@@ -1476,8 +1523,10 @@ namespace AlignToConnector
                     if (pre.FailingIds.Count > 0)
                         detail += "\nElements involved: " +
                                   string.Join("; ", pre.FailingIds.Select(id => Describe(doc, id)));
-                    return r.Fail(ConflictKind.RevitRejected, CenterOf(p), p.Id,
+                    ConflictInfo rej = r.Fail(ConflictKind.RevitRejected, CenterOf(p), p.Id,
                         "Revit rejected the adjustment" + detail);
+                    rej.InvolvedIds.AddRange(pre.FailingIds);
+                    return rej;
                 }
                 catch (Exception ex)
                 {
@@ -1492,7 +1541,7 @@ namespace AlignToConnector
         /// Moves the segment together with its fittings (elbows, tees, unions) as a single body, and adjusts
         /// the length of adjacent straight runs: the near end follows the movement and the far end stays fixed.
         /// </summary>
-        private static void MoveChain(Document doc, ChainResult r, XYZ d)
+        private static void MoveChain(Document doc, AlignSession s, ChainResult r, XYZ d, ICollection<ElementId> extraMoveIds)
         {
             // Neighbours connected to the chain on two sides: do not stretch, only translate with it
             var joints = new Dictionary<ElementId, int>();
@@ -1528,6 +1577,14 @@ namespace AlignToConnector
                     Line.CreateBound(nearIs0 ? nearNew : e0, nearIs0 ? e1 : nearNew)));
             }
 
+            // Boundary families that move with the chain travel in the same rigid move
+            if (extraMoveIds != null)
+                foreach (ElementId fid in extraMoveIds)
+                    if (!moveIds.Contains(fid)) moveIds.Add(fid);
+
+            // Cut points ('Disconnect and Align'): detach them BEFORE moving
+            DetachCutLinks(doc, s, new HashSet<ElementId>(moveIds));
+
             var stretched = new HashSet<ElementId>(stretch.Select(k => k.Key.Id));
 
             // 1) Disconnect joints on neighbours that will be stretched
@@ -1554,6 +1611,87 @@ namespace AlignToConnector
                 Connector b = FindConnector(doc, j.NeighbourId, j.NeighbourConnId);
                 if (a != null && b != null) { try { a.ConnectTo(b); } catch { } }
             }
+        }
+
+        /// <summary>Conflicts whose cause is the connectivity of the chain (not a physical obstacle).</summary>
+        public static bool IsConnectivityConflict(ConflictKind k)
+        {
+            return k == ConflictKind.RevitRejected || k == ConflictKind.NoSlack || k == ConflictKind.Skew;
+        }
+
+        /// <summary>
+        /// "Disconnect and Align" on a non-boundary conflict: locates the element(s) that limit the movement
+        /// (the one reported by the conflict and the ones Revit says are involved) and marks them as cut points.
+        /// If none is physically linked to the moving body, falls back to detaching the body from everything else.
+        /// </summary>
+        public static void PrepareCut(AlignSession s)
+        {
+            Document doc = s.Document;
+            ConflictInfo c = s.Conflict;
+            if (c == null) return;
+
+            s.MoveAllAttached = false;
+
+            var cand = new HashSet<ElementId>();
+            if (c.ConflictElementId != null && !c.ConflictElementId.Equals(ElementId.InvalidElementId))
+                cand.Add(c.ConflictElementId);
+            foreach (ElementId id in c.InvolvedIds) cand.Add(id);
+            cand.Remove(c.CurveId);
+            cand.Remove(s.PivotId);
+
+            var body = new HashSet<ElementId>(c.ChainIds);
+            foreach (ElementId id in c.FrontierIds) body.Add(id);
+
+            bool found = false;
+            foreach (ElementId id in cand)
+            {
+                Element e = doc.GetElement(id);
+                if (e == null || s.CutIds.Contains(id)) continue;
+
+                bool linked = false;
+                foreach (Connector k in GetConnectors(e))
+                {
+                    foreach (Connector o in GetRefs(k, e))
+                        if (o.Owner != null && !o.Owner.Id.Equals(id) && body.Contains(o.Owner.Id)) { linked = true; break; }
+                    if (linked) break;
+                }
+
+                if (linked) { s.CutIds.Add(id); found = true; }
+            }
+
+            if (!found)
+            {
+                // No new limiting element: isolate the moving body so the alignment cannot be blocked by connections
+                s.CutAll = true;
+                s.DisconnectAll = true;
+                s.Policies.Clear();
+            }
+        }
+
+        /// <summary>Detaches the moving body from the cut points (or from everything, in fallback mode).</summary>
+        private static int DetachCutLinks(Document doc, AlignSession s, HashSet<ElementId> moveSet)
+        {
+            if (!s.CutAll && s.CutIds.Count == 0) return 0;
+
+            int n = 0;
+            foreach (ElementId id in moveSet)
+            {
+                Element e = doc.GetElement(id);
+                if (e == null) continue;
+
+                foreach (Connector c in GetConnectors(e))
+                {
+                    foreach (Connector o in GetRefs(c, e))
+                    {
+                        ElementId oid = o.Owner.Id;
+                        if (moveSet.Contains(oid)) continue;
+                        if (!s.CutAll && !s.CutIds.Contains(oid)) continue;
+                        try { c.DisconnectFrom(o); n++; }
+                        catch { }
+                    }
+                }
+            }
+            return n;
         }
 
         /// <summary>
@@ -2061,6 +2199,9 @@ namespace AlignToConnector
         internal static Result ExecuteWithConnector(UIDocument uidoc, FamilyInstance fam, Connector conn, ref string message)
         {
             Document doc = uidoc.Document;
+            ElementId familyId = fam.Id;
+            int connectorId = conn.Id;
+            XYZ connectorOrigin = conn.Origin;
 
             if (AlinearConectorCommand.ActiveWindow != null)
             {
@@ -2074,12 +2215,12 @@ namespace AlignToConnector
             // REUSE PREVIOUS SEGMENT: only if the palette is open AND still locked to THIS same connector.
             // With another connector (or from the ribbon button) always prompt for the segment.
             if (AlignElementsSuite.ConnectorPalette.Window != null
-                && AlignElementsSuite.ConnectorPalette.ActiveFamilyId.Equals(fam.Id)
-                && AlignElementsSuite.ConnectorPalette.ActiveConnectorId == conn.Id
+                && AlignElementsSuite.ConnectorPalette.ActiveFamilyId.Equals(familyId)
+                && AlignElementsSuite.ConnectorPalette.ActiveConnectorId == connectorId
                 && !AlignElementsSuite.ConnectorPalette.ActiveCurveId.Equals(ElementId.InvalidElementId))
             {
                 Element existingElem = doc.GetElement(AlignElementsSuite.ConnectorPalette.ActiveCurveId);
-                if (existingElem is MEPCurve && !existingElem.Id.Equals(fam.Id))
+                if (existingElem is MEPCurve && !existingElem.Id.Equals(familyId))
                 {
                     targetCurveId = existingElem.Id;
                 }
@@ -2096,6 +2237,7 @@ namespace AlignToConnector
                     targetCurveId = tr.ElementId;
                 }
                 session.TargetIds.Add(targetCurveId);
+                session.TargetCurveId = targetCurveId;
             }
             catch (Autodesk.Revit.Exceptions.OperationCanceledException)
             {
@@ -2103,9 +2245,9 @@ namespace AlignToConnector
             }
 
             // Reference is the connector (re-located by Id on each evaluation)
-            session.PivotId = fam.Id;
-            session.PivotConnectorId = conn.Id;
-            session.PivotPointOverride = conn.Origin;
+            session.PivotId = familyId;
+            session.PivotConnectorId = connectorId;
+            session.PivotPointOverride = connectorOrigin;
             session.Axis = AlignAxis.Auto;
 
             // ---- Same engine as Script 1 ----
@@ -2121,11 +2263,13 @@ namespace AlignToConnector
                 return Result.Failed;
             }
 
-            // Launch / refresh floating palette to keep operating on the same connector and segment
-            AlignElementsSuite.ConnectorPalette.ShowFor(uidoc, fam.Id, conn.Id, targetCurveId);
-
             if (done)
             {
+                // Alignment completed immediately: only now launch / refresh the floating palette so it
+                // keeps this exact family, connector and pipe pinned (Stretch reuses them without asking).
+                // If there are conflicts, the palette is opened from AlignExternalHandler.AfterResolved.
+                AlignElementsSuite.ConnectorPalette.ShowFor(uidoc, familyId, connectorId, targetCurveId);
+
                 if (!string.IsNullOrEmpty(session.Note))
                     TaskDialog.Show("Align to Connector", session.Note);
                 return Result.Succeeded;
@@ -2452,8 +2596,8 @@ namespace AlignToConnector
             var cols = new List<ColorWithTransparency>();
             Action<XYZ, XYZ, ColorWithTransparency> add = (a, b, c) => { segs.Add(new[] { a, b }); cols.Add(c); };
 
-            var cyan   = new ColorWithTransparency(34, 184, 219, 0);   // Unselected
-            var gray   = new ColorWithTransparency(145, 145, 145, 0);  // Dimmed / non-selected
+            var cyan = new ColorWithTransparency(34, 184, 219, 0);   // Unselected
+            var gray = new ColorWithTransparency(145, 145, 145, 0);  // Dimmed / non-selected
             var picked = new ColorWithTransparency(0, 210, 90, 0);     // Selected connector
 
             double minDist = double.MaxValue;
