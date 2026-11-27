@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+
+  <!-- Rigid ducts: independent from the already working add-in (own DLL, own folder, own GUID) -->
+  <AddIn Type="Application">
+    <Name>Align Pipes Ducts</Name>
+    <Assembly>AlignPipes\AlignPipes.dll</Assembly>
+    <FullClassName>DuctAlignSuite.DuctAlignApp</FullClassName>
+    <ClientId>5d7c0a93-e1b4-47a6-8f32-c4a9d2e6b715</ClientId>
+    <VendorId>ICED</VendorId>
+    <VendorDescription>Irving Cedeño</VendorDescription>
+  </AddIn>
+
+</RevitAddIns>

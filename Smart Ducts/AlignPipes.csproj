@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <LangVersion>7.3</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>AlignPipes</AssemblyName>
+    <RootNamespace>DuctAlignSuite</RootNamespace>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit 2026\</RevitInstallDir>
+    <AddinsDir>$(AppData)\Autodesk\Revit\Addins\2026\</AddinsDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitInstallDir)RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>$(RevitInstallDir)RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="*.png" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Icons\*.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Deploys to its OWN folder (AlignPipes) and its OWN .addin, so the already working add-in is never touched -->
+  <Target Name="DeployToRevit" AfterTargets="Build">
+    <ItemGroup>
+      <DeployFiles Include="$(OutDir)AlignPipes.dll" />
+      <DeployFiles Include="$(OutDir)AlignPipes.pdb" />
+      <DeployFiles Include="$(OutDir)*.png" />
+    </ItemGroup>
+    <MakeDir Directories="$(AddinsDir)AlignPipes" ContinueOnError="true" />
+    <Copy SourceFiles="@(DeployFiles)" DestinationFolder="$(AddinsDir)AlignPipes"
+          SkipUnchangedFiles="true" Retries="1" RetryDelayMilliseconds="300" ContinueOnError="WarnAndContinue" />
+    <Copy SourceFiles="AlignPipes.addin" DestinationFolder="$(AddinsDir)"
+          SkipUnchangedFiles="true" Retries="1" RetryDelayMilliseconds="300" ContinueOnError="WarnAndContinue" />
+  </Target>
+
+</Project>
